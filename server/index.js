@@ -17,7 +17,7 @@ dns.setServers([
 
 const app = express()
 app.use(cors({
-    origin:"http://localhost:5173",
+    origin:"https://smart-ai-interview-agent.onrender.com",
     credentials:true
 }))
 
