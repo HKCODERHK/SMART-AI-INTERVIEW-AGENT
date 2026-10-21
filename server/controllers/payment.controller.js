@@ -49,31 +49,33 @@ export const verifyPayment = async (req,res) => {
       .update(body)
       .digest("hex");
 
-    if (expectedSignature !== razorpay_signature) {
+    // constant-time compare; lengths must match first or timingSafeEqual throws
+    const expected = Buffer.from(expectedSignature);
+    const received = Buffer.from(String(razorpay_signature ?? ""));
+    if (expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
       return res.status(400).json({ message: "Invalid payment signature" });
     }
 
-     const payment = await Payment.findOne({
-      razorpayOrderId: razorpay_order_id,
-    });
+    // One atomic step: only the request that flips "created" -> "paid" gets the document,
+    // so parallel requests for the same order can never credit twice.
+    const payment = await Payment.findOneAndUpdate(
+      { razorpayOrderId: razorpay_order_id, status: "created" },
+      { $set: { status: "paid", razorpayPaymentId: razorpay_payment_id } },
+      { returnDocument: "after" }
+    );
 
     if (!payment) {
+      const existing = await Payment.findOne({ razorpayOrderId: razorpay_order_id });
+      if (existing?.status === "paid") {
+        return res.json({ message: "Already processed" });
+      }
       return res.status(404).json({ message: "Payment not found" });
     }
-
-    if (payment.status === "paid") {
-      return res.json({ message: "Already processed" });
-    }
-
-    // Update payment record
-    payment.status = "paid";
-    payment.razorpayPaymentId = razorpay_payment_id;
-    await payment.save();
 
     // Add credits to user
     const updatedUser = await User.findByIdAndUpdate(payment.userId, {
       $inc: { credits: payment.credits }
-    },{new:true});
+    },{returnDocument:"after"});
 
     res.json({
       success: true,
