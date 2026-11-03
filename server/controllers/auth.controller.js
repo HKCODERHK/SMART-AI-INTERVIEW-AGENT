@@ -1,10 +1,32 @@
 import genToken from "../config/token.js"
+import verifyGoogleIdToken, { FirebaseNotConfiguredError } from "../config/firebaseAdmin.js"
 import User from "../models/user.model.js"
 
 
 export const googleAuth = async (req,res) => {
     try {
-        const {name , email} = req.body
+        const {idToken} = req.body
+        if(!idToken || typeof idToken !== "string"){
+            return res.status(401).json({message:"Google ID token is required"})
+        }
+
+        // name and email come only from the verified token, never from the request body
+        let decoded
+        try {
+            decoded = await verifyGoogleIdToken(idToken)
+        } catch (error) {
+            if(error instanceof FirebaseNotConfiguredError){
+                throw error
+            }
+            return res.status(401).json({message:"Invalid or expired Google ID token"})
+        }
+
+        const email = decoded.email
+        if(!email || decoded.email_verified === false){
+            return res.status(401).json({message:"Google account email is not verified"})
+        }
+        const name = decoded.name || email.split("@")[0]
+
         let user = await User.findOne({email})
         if(!user){
             user = await User.create({

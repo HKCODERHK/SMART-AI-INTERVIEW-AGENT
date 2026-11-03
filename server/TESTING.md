@@ -23,9 +23,9 @@ The first run downloads a MongoDB binary (about 100 MB), so it is slower. After 
 
 A mock is a fake version of a module that the test controls. `vi.mock("../services/razorpay.service.js", ...)` replaces the real Razorpay client with an object whose `orders.create` returns `{ id: "order_test_1", ... }` and records what it was called with.
 
-Razorpay and OpenRouter are mocked because:
+Razorpay, OpenRouter and Firebase Admin are mocked because:
 
-- the tests must not create real orders or spend real money or AI credits,
+- the tests must not create real orders, spend real money or AI credits, or call Google,
 - they need no API keys, so no secrets in CI,
 - they don't depend on the network, so they are fast and give the same result every time,
 - a test can check exactly what the app sent, for example "amount was 100 × 100 = 10000 paise".
@@ -65,6 +65,14 @@ MongoDB applies this to the document as a single operation, so only one request 
 
 - `tests/auth.test.js`: the `isAuth` middleware (no cookie, garbage token, expired token, token signed with another secret, valid token, deleted user), the login cookie flags (`HttpOnly`, `Secure`, `SameSite=None`) and logout clearing the cookie.
 - `tests/payment.test.js`: creating an order (validation, amount in paise, saved `Payment`) and verifying it (valid signature, tampered signature, wrong payment ID, wrong-length signature, unknown order, repeated request, parallel requests, not logged in).
-- One skipped test documents a known issue in `POST /api/auth/google`: it trusts the email sent in the request body. It will be un-skipped once the server verifies Google ID tokens.
+- Google login (`POST /api/auth/google`): a request without a valid Google ID token gets 401, and the name and email always come from the verified token, never from the request body. The fake Firebase in `tests/setup.js` accepts only tokens made by `googleIdToken()` in `tests/helpers.js`.
+
+## How Google login is verified
+
+1. The browser signs in with Firebase and sends the server its Google ID token, not the name and email.
+2. The server checks the token with `firebase-admin` (`config/firebaseAdmin.js`). That checks Google's signature, the expiry date and our Firebase project, and returns the name and email inside the token.
+3. Before this fix the server trusted the email in the request body, so anyone could send `{"email": "someone@gmail.com"}` and be logged in as that person.
+
+On the server, `FIREBASE_SERVICE_ACCOUNT_BASE64` holds the Firebase service-account JSON file, base64-encoded. If it is missing or broken, Google login returns 500 instead of letting anyone in.
 
 CI runs the same `npm test` on every push and pull request (`.github/workflows/server-tests.yml`).

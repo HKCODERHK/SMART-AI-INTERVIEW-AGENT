@@ -26,6 +26,22 @@ vi.mock("../services/openRouter.service.js", () => ({
     askAi: vi.fn(async () => "{}"),
 }))
 
+// No real Firebase: a token made by googleIdToken() in helpers.js decodes to its claims,
+// anything else is rejected the way firebase-admin rejects a bad token.
+vi.mock("../config/firebaseAdmin.js", () => {
+    class FirebaseNotConfiguredError extends Error {}
+    const prefix = "fake-google-id-token:"
+    return {
+        FirebaseNotConfiguredError,
+        default: vi.fn(async (idToken) => {
+            if (!idToken.startsWith(prefix)) {
+                throw Object.assign(new Error("Decoding Firebase ID token failed"), { code: "auth/argument-error" })
+            }
+            return JSON.parse(Buffer.from(idToken.slice(prefix.length), "base64url").toString("utf8"))
+        }),
+    }
+})
+
 let mongo
 
 beforeAll(async () => {

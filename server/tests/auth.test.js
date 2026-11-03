@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, afterEach, vi } from "vitest"
 import request from "supertest"
 import mongoose from "mongoose"
 import app from "../app.js"
 import User from "../models/user.model.js"
-import { authCookie } from "./helpers.js"
+import { authCookie, googleIdToken } from "./helpers.js"
 
 const createUser = () => User.create({ name: "Asha", email: "asha@example.com", credits: 100 })
 
@@ -57,7 +57,7 @@ describe("auth cookies", () => {
     it("login sets an HttpOnly, Secure, SameSite=None token cookie", async () => {
         const res = await request(app)
             .post("/api/auth/google")
-            .send({ name: "Asha", email: "asha@example.com" })
+            .send({ idToken: googleIdToken({ name: "Asha", email: "asha@example.com" }) })
         expect(res.status).toBe(200)
         const cookie = res.headers["set-cookie"].find((c) => c.startsWith("token="))
         expect(cookie).toBeDefined()
@@ -78,16 +78,80 @@ describe("auth cookies", () => {
     })
 })
 
-describe("POST /api/auth/google (known security issue, not fixed yet)", () => {
-    // SECURITY: googleAuth trusts `name` and `email` from the request body, so anyone who
-    // POSTs {"email": "victim@gmail.com"} is logged in as that user. The fix is to send the
-    // Firebase ID token from the client and verify it on the server with firebase-admin,
-    // taking the email from the verified token. That needs a Firebase service-account key,
-    // so it is waiting on the owner. Un-skip this test once the fix is in.
-    it.skip("rejects a login that has no verified Google ID token", async () => {
+describe("POST /api/auth/google", () => {
+    // Before the fix, googleAuth trusted `name` and `email` from the request body, so anyone who
+    // POSTed {"email": "victim@gmail.com"} was logged in as that user.
+    it("rejects a login that has no verified Google ID token", async () => {
         await User.create({ name: "Victim", email: "victim@gmail.com" })
         const res = await request(app).post("/api/auth/google").send({ email: "victim@gmail.com" })
         expect(res.status).toBe(401)
         expect(res.headers["set-cookie"]).toBeUndefined()
+    })
+
+    it("rejects an invalid Google ID token", async () => {
+        const res = await request(app)
+            .post("/api/auth/google")
+            .send({ idToken: "forged-token", email: "victim@gmail.com" })
+        expect(res.status).toBe(401)
+        expect(res.headers["set-cookie"]).toBeUndefined()
+    })
+
+    it("rejects a token whose email is not verified", async () => {
+        const res = await request(app)
+            .post("/api/auth/google")
+            .send({ idToken: googleIdToken({ email: "asha@example.com", email_verified: false }) })
+        expect(res.status).toBe(401)
+    })
+
+    it("takes the email from the verified token, not from the body", async () => {
+        await User.create({ name: "Victim", email: "victim@gmail.com", credits: 999 })
+        const res = await request(app)
+            .post("/api/auth/google")
+            .send({
+                idToken: googleIdToken({ name: "Asha", email: "asha@example.com" }),
+                name: "Victim",
+                email: "victim@gmail.com",
+            })
+        expect(res.status).toBe(200)
+        expect(res.body.email).toBe("asha@example.com")
+        expect(res.body.name).toBe("Asha")
+        expect(res.body.credits).toBe(100)
+    })
+
+    it("logs an existing user back into the same account", async () => {
+        const existing = await User.create({ name: "Asha", email: "asha@example.com", credits: 40 })
+        const res = await request(app)
+            .post("/api/auth/google")
+            .send({ idToken: googleIdToken({ name: "Asha", email: "asha@example.com" }) })
+        expect(res.status).toBe(200)
+        expect(res.body._id).toBe(String(existing._id))
+        expect(res.body.credits).toBe(40)
+        expect(await User.countDocuments()).toBe(1)
+    })
+})
+
+describe("config/firebaseAdmin.js (real module, no network)", () => {
+    const loadReal = () => vi.importActual("../config/firebaseAdmin.js")
+
+    afterEach(() => {
+        delete process.env.FIREBASE_SERVICE_ACCOUNT_BASE64
+    })
+
+    it("throws FirebaseNotConfiguredError when the env var is missing", async () => {
+        const { default: verify, FirebaseNotConfiguredError } = await loadReal()
+        await expect(verify("any-token")).rejects.toBeInstanceOf(FirebaseNotConfiguredError)
+    })
+
+    it("throws FirebaseNotConfiguredError when the env var is not a service account", async () => {
+        process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 = Buffer.from("not json").toString("base64")
+        const { default: verify, FirebaseNotConfiguredError } = await loadReal()
+        await expect(verify("any-token")).rejects.toBeInstanceOf(FirebaseNotConfiguredError)
+    })
+
+    it("returns 500, not 401, when the server is not configured", async () => {
+        const { default: verify, FirebaseNotConfiguredError } = await import("../config/firebaseAdmin.js")
+        verify.mockRejectedValueOnce(new FirebaseNotConfiguredError("FIREBASE_SERVICE_ACCOUNT_BASE64 is not set"))
+        const res = await request(app).post("/api/auth/google").send({ idToken: "anything" })
+        expect(res.status).toBe(500)
     })
 })
